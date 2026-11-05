@@ -27,6 +27,12 @@ def mock_user():
     )()
 
 
+def mock_super_librarian():
+    user = mock_user()
+    type(user).is_super_librarian = lambda slf: True
+    return user
+
+
 class TestSaveBookHelper:
     def setup_method(self, method):
         web.ctx.site = MockSite()
@@ -108,7 +114,7 @@ class TestSaveBookHelper:
         assert web.ctx.site.get("/books/OL1M").works[0].key == "/works/OL1W"
 
     def test_moving_orphan(self, monkeypatch):
-        monkeypatch.setattr(accounts, "get_current_user", mock_user)
+        monkeypatch.setattr(accounts, "get_current_user", mock_super_librarian)
 
         web.ctx.site.save_many(
             [
@@ -137,7 +143,7 @@ class TestSaveBookHelper:
         assert web.ctx.site.get("/books/OL1M").works[0].key == "/works/OL1W"
 
     def test_moving_orphan_ignores_work_edits(self, monkeypatch):
-        monkeypatch.setattr(accounts, "get_current_user", mock_user)
+        monkeypatch.setattr(accounts, "get_current_user", mock_super_librarian)
 
         web.ctx.site.save_many(
             [
@@ -281,7 +287,7 @@ class TestSaveBookHelper:
         assert web.ctx.site.get("/books/OL1M").title == "Modified Edition Title"
 
     def test_moving_edition(self, monkeypatch):
-        monkeypatch.setattr(accounts, "get_current_user", mock_user)
+        monkeypatch.setattr(accounts, "get_current_user", mock_super_librarian)
 
         web.ctx.site.save_many(
             [
@@ -317,7 +323,7 @@ class TestSaveBookHelper:
         assert web.ctx.site.get("/books/OL1M").works[0].key == "/works/OL2W"
 
     def test_moving_edition_ignores_changes_to_work(self, monkeypatch):
-        monkeypatch.setattr(accounts, "get_current_user", mock_user)
+        monkeypatch.setattr(accounts, "get_current_user", mock_super_librarian)
 
         web.ctx.site.save_many(
             [
@@ -353,7 +359,7 @@ class TestSaveBookHelper:
         assert web.ctx.site.get("/works/OL1W").title == "Original Work Title"
 
     def test_moving_edition_to_new_work(self, monkeypatch):
-        monkeypatch.setattr(accounts, "get_current_user", mock_user)
+        monkeypatch.setattr(accounts, "get_current_user", mock_super_librarian)
 
         web.ctx.site.save_many(
             [
@@ -401,7 +407,7 @@ class TestSaveBookHelper:
         assert not new_work.subjects
 
     def test_moving_edition_to_new_work_can_copy_data(self, monkeypatch):
-        monkeypatch.setattr(accounts, "get_current_user", mock_user)
+        monkeypatch.setattr(accounts, "get_current_user", mock_super_librarian)
 
         web.ctx.site.save_many(
             [
@@ -447,7 +453,7 @@ class TestSaveBookHelper:
         assert new_work.subjects == old_work.subjects
 
     def test_moving_edition_to_new_work_copy_when_none(self, monkeypatch):
-        monkeypatch.setattr(accounts, "get_current_user", mock_user)
+        monkeypatch.setattr(accounts, "get_current_user", mock_super_librarian)
 
         web.ctx.site.save_many(
             [
@@ -489,6 +495,135 @@ class TestSaveBookHelper:
         # Should ignore authors/subjects by default
         assert not new_work.authors
         assert not new_work.subjects
+
+    def _setup_work_and_edition(self):
+        web.ctx.site.save_many(
+            [
+                {"type": {"key": "/type/work"}, "key": "/works/OL1W", "title": "Original Work Title"},
+                {"type": {"key": "/type/work"}, "key": "/works/OL2W", "title": "Other Work Title"},
+                {
+                    "type": {"key": "/type/edition"},
+                    "key": "/books/OL1M",
+                    "title": "Original Edition Title",
+                    "works": [{"key": "/works/OL1W"}],
+                },
+            ]
+        )
+        return web.ctx.site.get("/works/OL1W"), web.ctx.site.get("/books/OL1M")
+
+    @pytest.mark.parametrize("new_key", ["/works/OL2W", "__new__"])
+    def test_regular_user_cannot_move_edition(self, monkeypatch, new_key):
+        monkeypatch.setattr(accounts, "get_current_user", mock_user)
+        work, edition = self._setup_work_and_edition()
+
+        formdata = web.storage(
+            {
+                "work--key": "/works/OL1W",
+                "work--title": "Original Work Title",
+                "edition--title": "Original Edition Title",
+                "edition--works--0--key": new_key,
+            }
+        )
+
+        s = addbook.SaveBookHelper(work, edition)
+        with pytest.raises(addbook.ValidationException):
+            s.save(formdata)
+
+        assert web.ctx.site.get("/books/OL1M").works[0].key == "/works/OL1W"
+
+    def test_anonymous_user_cannot_move_edition(self, monkeypatch):
+        monkeypatch.setattr(accounts, "get_current_user", lambda: None)
+        work, edition = self._setup_work_and_edition()
+
+        formdata = web.storage(
+            {
+                "work--key": "/works/OL1W",
+                "work--title": "Original Work Title",
+                "edition--title": "Original Edition Title",
+                "edition--works--0--key": "/works/OL2W",
+            }
+        )
+
+        s = addbook.SaveBookHelper(work, edition)
+        with pytest.raises(addbook.ValidationException):
+            s.save(formdata)
+
+    def test_regular_user_cannot_move_orphan(self, monkeypatch):
+        monkeypatch.setattr(accounts, "get_current_user", mock_user)
+        web.ctx.site.save_many([{"type": {"key": "/type/edition"}, "key": "/books/OL1M", "title": "Original Edition Title"}])
+        edition = web.ctx.site.get("/books/OL1M")
+
+        formdata = web.storage(
+            {
+                "work--key": "",
+                "work--title": "Original Edition Title",
+                "edition--title": "Original Edition Title",
+                "edition--works--0--key": "/works/OL1W",
+            }
+        )
+
+        s = addbook.SaveBookHelper(None, edition)
+        with pytest.raises(addbook.ValidationException):
+            s.save(formdata)
+
+    def test_regular_user_can_edit_edition_without_works_field(self, monkeypatch):
+        monkeypatch.setattr(accounts, "get_current_user", mock_user)
+        work, edition = self._setup_work_and_edition()
+
+        formdata = web.storage(
+            {
+                "work--key": "/works/OL1W",
+                "work--title": "Original Work Title",
+                "edition--title": "Modified Edition Title",
+            }
+        )
+
+        s = addbook.SaveBookHelper(work, edition)
+        s.save(formdata)
+
+        assert web.ctx.site.get("/books/OL1M").title == "Modified Edition Title"
+        assert web.ctx.site.get("/books/OL1M").works[0].key == "/works/OL1W"
+
+    def test_regular_user_can_resubmit_same_work(self, monkeypatch):
+        monkeypatch.setattr(accounts, "get_current_user", mock_user)
+        work, edition = self._setup_work_and_edition()
+
+        formdata = web.storage(
+            {
+                "work--key": "/works/OL1W",
+                "work--title": "Original Work Title",
+                "edition--title": "Modified Edition Title",
+                "edition--works--0--key": "/works/OL1W",
+            }
+        )
+
+        s = addbook.SaveBookHelper(work, edition)
+        s.save(formdata)
+
+        assert web.ctx.site.get("/books/OL1M").title == "Modified Edition Title"
+
+    def test_admin_can_move_edition(self, monkeypatch):
+        def mock_admin():
+            user = mock_user()
+            type(user).is_admin = lambda slf: True
+            return user
+
+        monkeypatch.setattr(accounts, "get_current_user", mock_admin)
+        work, edition = self._setup_work_and_edition()
+
+        formdata = web.storage(
+            {
+                "work--key": "/works/OL1W",
+                "work--title": "Original Work Title",
+                "edition--title": "Original Edition Title",
+                "edition--works--0--key": "/works/OL2W",
+            }
+        )
+
+        s = addbook.SaveBookHelper(work, edition)
+        s.save(formdata)
+
+        assert web.ctx.site.get("/books/OL1M").works[0].key == "/works/OL2W"
 
 
 class TestDaisyPage:

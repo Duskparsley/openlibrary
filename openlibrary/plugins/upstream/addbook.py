@@ -712,6 +712,7 @@ class SaveBookHelper:
             edition[k] = edition.get(k) or []
 
         self._prevent_ocaid_deletion(edition)
+        self._prevent_work_change(edition)
         return edition
 
     def process_work(self, work: web.Storage) -> web.Storage:
@@ -778,6 +779,25 @@ class SaveBookHelper:
                 ocaid,
             )
             raise ValidationException("Changing Internet Archive ID is not allowed.")
+
+    def _prevent_work_change(self, edition) -> None:
+        user = accounts.get_current_user()
+        if user and user.is_super_librarian_or_higher():
+            return
+
+        submitted = [w.get("key") for w in edition.get("works") or [] if w.get("key")]
+        if not submitted:
+            return
+
+        current = [w.key for w in (self.edition and self.edition.get("works")) or []]
+        if submitted != current:
+            logger.warning(
+                "Attempt by non super librarian to change work of %s from %r to %r.",
+                self.edition and self.edition.key,
+                current,
+                submitted,
+            )
+            raise ValidationException("Only super librarians and admins can change which work this is an edition of.")
 
     @staticmethod
     def use_work_edits(formdata: web.Storage) -> bool:
